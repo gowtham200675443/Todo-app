@@ -1,0 +1,199 @@
+# from typing import Annotated
+# from fastapi import APIRouter, Depends, HTTPException
+# from pydantic import BaseModel
+# from sqlalchemy.orm import Session
+# from starlette import status
+#
+# from database import SessionLocal
+# from models import User
+# from passlib.context import CryptContext
+#
+# router = APIRouter()
+# bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+#
+# class CreateUserRequest(BaseModel):
+#     email: str
+#     password: str
+#     username: str
+#     firstname: str
+#     lastname: str
+#     role: str
+#
+# # DB Dependency
+# def get_db():
+#     db = SessionLocal()
+#     try:
+#         yield db
+#     finally:
+#         db.close()
+#
+# db_dependency = Annotated[Session, Depends(get_db)]
+#
+# @router.post("/auth", status_code=status.HTTP_201_CREATED)
+# async def create_user(create_user: CreateUserRequest, db: db_dependency):
+#
+#     # check if email exists
+#     user_exists = db.query(User).filter(User.email == create_user.email).first()
+#     if user_exists:
+#         raise HTTPException(status_code=400, detail="Email already registered")
+#
+#     # Hash password
+#     hashed_password = bcrypt_context.hash(create_user.password)
+#
+#     # Create user object
+#     new_user = User(
+#         email=create_user.email,
+#         hashed_password=hashed_password,
+#         username=create_user.username,
+#         firstname=create_user.firstname,
+#         lastname=create_user.lastname,
+#         role=create_user.role,
+#         is_active=True
+#     )
+#
+#     db.add(new_user)
+#     db.commit()
+#     db.refresh(new_user)
+#
+#     return {
+#         "message": "User created successfully",
+#         "id": new_user.id,
+#         "email": new_user.email,
+#         "username": new_user.username
+#     }
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+
+import os
+from datetime import timedelta, datetime
+from typing import Annotated
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic.v1 import BaseModel
+from sqlalchemy.orm import Session
+from starlette import status
+from database import SessionLocal
+from models import User
+from passlib.context import CryptContext
+from fastapi.security import OAuth2PasswordRequestForm , OAuth2PasswordBearer
+from jose import JWTError, jwt
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["auth"]
+)
+
+bcrypt_Context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_bearer = OAuth2PasswordBearer(tokenUrl="auth/token")
+SECRET_KEY = "f3a426e8f201a370ea3a254830fa8cf33317ef24fa4a4d62248f16b3fd008059"
+ALGORITHM = "HS256"
+
+class CreateUserRequest(BaseModel):
+    email : str
+    password : str
+    username : str
+    firstname : str
+    lastname : str
+    role : str
+
+# Dependency for DB session:
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+db_dependency = Annotated[Session, Depends(get_db)]
+def authenticate_user(username : str,password : str,db ): # Helper function
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        return False
+    if not bcrypt_Context.verify(password, user.hashed_password):
+        return False
+    return user
+
+def create_access_token(username : str,user_id : str, role : str, expires_delta: timedelta ):
+    encode = {
+        'sub' : username,
+        'id' : user_id,
+        'role': role
+    }
+    expire = datetime.utcnow() + expires_delta
+    encode.update({'exp' : expire})
+    return jwt.encode(encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# async def get_current_user(token:Annotated[str, Depends(oauth2_bearer)]):
+#     try:
+#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+#         username: str = payload.get('sub')
+#         user_id: str = payload.get('id')
+#         user_role: str = payload.get('role')
+#         if username is None or user_id is None:
+#             raise HTTPException(
+#                 status_code=status.HTTP_401_UNAUTHORIZED,
+#                 detail="Could not validate credentials"
+#             )
+#         return {'username': username, 'id': user_id , 'role': user_role}
+#     except JWTError:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Could not validate credentials"
+#         )
+
+async def get_current_user(token: Annotated[str, Depends(oauth2_bearer)]):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get('sub')
+        user_id: str = payload.get('id')
+        user_role: str = payload.get('role')
+        if username is None or user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials"
+            )
+        return {'username': username, 'id': user_id, 'role': user_role}
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials"
+        )
+
+@router.post("/",status_code=status.HTTP_201_CREATED)
+async def create_user(db:db_dependency, create_user: CreateUserRequest):
+    new_user = User(
+        email=create_user.email,
+        hashed_password=bcrypt_Context.hash(create_user.password),
+        username=create_user.username,
+        firstname=create_user.firstname,
+        lastname=create_user.lastname,
+        role=create_user.role,
+        is_active=True
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    return new_user
+
+
+@router.get("/")
+async def read_all(db: db_dependency):
+    users = db.query(User).all()
+    return users
+
+@router.post("/token",status_code=status.HTTP_200_OK)
+async def login_for_access_token(form_data: Annotated [OAuth2PasswordRequestForm ,Depends()], db: db_dependency):
+    user = authenticate_user(form_data.username,form_data.password,db)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials"
+        )
+    token = create_access_token(user.username,user.id,user.role,timedelta(minutes=30))
+    # return token
+    return {"access_token": token,"token_type": "bearer"}
+
+# @router.delete("/delete",status_code=status.HTTP_204_NO_CONTENT)
+# async def delete_user(db: db_dependency,token):
+#     user = db.query(User).filter(User.id == token).first()
